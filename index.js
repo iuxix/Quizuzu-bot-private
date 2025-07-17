@@ -1,7 +1,9 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const { Low, JSONFile } = require('lowdb');
+const { Low } = require('lowdb');
+const { JSONFile } = require('lowdb/node');
+
 const path = require('path');
 
 // === BOT SETUP ===
