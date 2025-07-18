@@ -185,48 +185,37 @@ async function sendGroupQuiz(msg, user) {
 // --- POLL ANSWER HANDLER WITH DEBUG MESSAGE TO GROUP! ---
 bot.on('poll_answer', async answer => {
   await db.read();
-  // DEBUG: show poll_answer in main group and log
-  if (answer.user) {
-    bot.sendMessage(GROUP_ID,
-      `🐞 [DEBUG] poll_answer received!\nUser: ${answer.user.first_name||answer.user.username||answer.user.id}\nOption: [${answer.option_ids}]\nPoll ID: ${answer.poll_id}`
-    );
-  }
   const user = db.data.users.find(u => u.id === answer.user.id);
   if (!user) return;
+  // DEBUG LINE
+  bot.sendMessage(-1002283571682, `🐞 [DEBUG] poll_answer received!\nUser: ${answer.user.first_name||answer.user.username||answer.user.id}\nOption: [${answer.option_ids}]\nPoll ID: ${answer.poll_id}`);
+  
+  // Always try to get the last question for that chat:user combo, even if answered
   const keys = Object.keys(db.data.last_questions);
-  let entryKey = keys.find(k => k.endsWith(":" + user.id) && !db.data.last_questions[k].answered);
+  let entryKey = keys.find(k => k.endsWith(":" + user.id));
   if (!entryKey) return;
   const last = db.data.last_questions[entryKey];
+  if (last.answered) return; // Prevent double-processing
+
   last.answered = true;
   const chatId = last.chatId;
   const now = Date.now();
   const correct = answer.option_ids.includes(last.correctIndex);
-  if (last.isGroup && chatId !== GROUP_ID) return;
-  if (!last.isGroup) {
-    let bonus = correct && ((now - last.time) < 30000) ? 2 : 1;
-    if (correct) {
-      user.points += bonus; user.streak++; user.level = getLevel(user.points); await updateUser(user);
-      bot.sendMessage(chatId, `✅ *Correct!* (+${bonus} pts)\n${prettyUsername(user, true)}\n🔥 *Streak:* ${user.streak}`, { parse_mode: "Markdown" });
-      setTimeout(() => sendPrivateQuiz({chat:{id:chatId}}, user), 1000);
-    } else {
-      user.streak = 0; await updateUser(user); last.wrong = true;
-      bot.sendMessage(chatId, `❌ *Wrong!* ${prettyUsername(user, true)}\nType /answer for explanation.`, { parse_mode: "Markdown" });
-    }
+
+  let pts = getPoints(chatId, user.id);
+  let streak = getStreak(chatId, user.id);
+  let bonus = (correct && ((now - last.time) < 30000)) ? 2 : 1;
+
+  if (correct) {
+    pts += bonus; streak += 1;
+    setPoints(chatId, user.id, pts);
+    setStreak(chatId, user.id, streak);
+    bot.sendMessage(chatId, `✅ *Correct!* (+${bonus} pts)\n${prettyUsername(user,true)}\n🔥 *Streak:* ${streak}`, { parse_mode: "Markdown" });
+    setTimeout(() => sendQuiz(chatId, user, last.isGroup), 900);
   } else {
-    let pts = getGroupPoints(user.id);
-    let streak = getGroupStreak(user.id);
-    let bonus = correct && ((now - last.time) < 30000) ? 2 : 1;
-    if (correct) {
-      pts += bonus; streak += 1;
-      setGroupPoints(user.id, pts);
-      setGroupStreak(user.id, streak);
-      bot.sendMessage(chatId, `✅ *Correct!* (+${bonus} pts)\n👤 ${prettyUsername(user, true)}\n🔥 *Group Streak:* ${streak}`, { parse_mode: "Markdown" });
-      setTimeout(() => sendGroupQuiz({chat:{id:chatId}}, user), 1000);
-    } else {
-      streak = 0; setGroupStreak(user.id, streak); last.wrong = true;
-      bot.sendMessage(chatId, `❌ *Wrong!* ${prettyUsername(user, true)}\nTry /answer for explanation.`, { parse_mode: "Markdown" });
-    }
-    await db.write();
+    streak = 0; setStreak(chatId, user.id, streak);
+    last.wrong = true;
+    bot.sendMessage(chatId, `❌ *Wrong!* ${prettyUsername(user,true)}\nTry /answer for explanation.`, { parse_mode: "Markdown" });
   }
   db.data.last_questions[entryKey] = last;
   await db.write();
