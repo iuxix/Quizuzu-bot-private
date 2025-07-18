@@ -78,7 +78,6 @@ async function getUser(msg) {
     };
     db.data.users.push(user);
     await db.write();
-    // Notify admin about a new user in DM
     if (ADMIN_ID && String(ADMIN_ID) !== String(user.id)) {
       const clickable = user.username ? `[${prettyUsername(user, false)}](https://t.me/${user.username})` : prettyUsername(user, false);
       bot.sendMessage(
@@ -96,14 +95,12 @@ async function updateUser(user) {
   await db.write();
 }
 
-// Initialize database structure
 (async function() {
   await db.read();
   db.data ||= { users: [], hints: {}, last_questions: {}, groups: [] };
   await db.write();
 })();
 
-// Detect when the bot is added to a new group and register group
 bot.on('my_chat_member', async ctx => {
   if (
     (ctx.new_chat_member.status === "member" || ctx.new_chat_member.status === "administrator")
@@ -140,6 +137,19 @@ async function fetchQuestion() {
   };
 }
 async function sendQuiz(chatId, user, isGroup = false) {
+  // Register group and user groupStats if in group
+  if (isGroup && chatId < 0) {
+    await db.read();
+    // Ensure group tracking
+    if (!db.data.groups.find(g => g.id === chatId)) {
+      db.data.groups.push({ id: chatId, title: "" });
+      await db.write();
+    }
+    // Ensure user has groupStats for this group
+    user.groupStats ||= {};
+    user.groupStats[chatId] ||= 0;
+    await updateUser(user);
+  }
   const quiz = await fetchQuestion();
   db.data.last_questions[chatId + ":" + user.id] = { ...quiz, time: Date.now(), isGroup, chatId, answered: false, wrong: false };
   await db.write();
@@ -187,18 +197,10 @@ bot.onText(/^\/start$/, async msg => {
 
 bot.onText(/^\/quiz$/, async msg => {
   let user = await getUser(msg);
-  // Register group if in group chat:
-  if (msg.chat.type.endsWith("group")) {
-    await db.read();
-    if (!db.data.groups.find(g => g.id === msg.chat.id)) {
-      db.data.groups.push({ id: msg.chat.id, title: msg.chat.title || "" });
-      await db.write();
-    }
-  }
-  await sendQuiz(msg.chat.id, user, msg.chat.type.endsWith("group"));
+  const isGroup = msg.chat.type.endsWith("group");
+  await sendQuiz(msg.chat.id, user, isGroup);
 });
 
-// Group battle
 bot.onText(/^\/fight$/, async msg => {
   if (!msg.chat.type.endsWith("group"))
     return bot.sendMessage(msg.chat.id, "⚔️ That’s a group-only battle! Add me to your group and try again.");
@@ -281,10 +283,12 @@ bot.onText(/^\/leaderboard$/, async msg => {
   }
   await db.read();
   const groupId = msg.chat.id;
-  let groupUsers = db.data.users
-    .filter(u => u.groupStats && u.groupStats[groupId] && u.points > 0)
-    .sort((a, b) => b.points - a.points)
-    .slice(0, 10);
+  // Filter users who have points in groupStats for this group
+  let groupUsers = db.data.users.filter(u =>
+    u.groupStats &&
+    u.groupStats[groupId] &&
+    u.groupStats[groupId] > 0
+  ).sort((a, b) => b.points - a.points).slice(0, 10);
   if (!groupUsers.length) {
     return bot.sendMessage(msg.chat.id, "🏆 *No active players in this group yet!*\nBe the first to answer quizzes and top the leaderboards!", { parse_mode: "Markdown" });
   }
@@ -407,7 +411,6 @@ bot.onText(/^\/groupstats$/, async msg => {
   await db.read();
   let groupChats = [];
   for (const group of db.data.groups) {
-    // Count how many unique users have stats for this group
     const groupId = group.id;
     const userCount = db.data.users.filter(u => u.groupStats && u.groupStats[groupId] !== undefined).length;
     groupChats.push({ ...group, userCount });
@@ -431,18 +434,16 @@ bot.onText(/^\/users$/, async msg => {
   bot.sendMessage(msg.chat.id, text, { parse_mode: "Markdown" });
 });
 
-// Main answer handler for quizzes, group support and auto-repeat quiz
 bot.on('poll_answer', async answer => {
   await db.read();
   let user = db.data.users.find(u => u.id === answer.user.id);
   if (!user) user = await getUser({ from: answer.user });
-  // Match key for last_questions
   let key = Object.keys(db.data.last_questions).find(k => k.endsWith(":" + user.id));
   let last = db.data.last_questions[key];
   if (!last) return;
   let now = Date.now(), bonus = 1;
   last.answered = true;
-  const replyChatId = last.isGroup ? last.chatId : user.id; // always reply in group if it was a group quiz
+  const replyChatId = last.isGroup ? last.chatId : user.id;
 
   if (answer.option_ids && answer.option_ids.includes(last.correct)) {
     last.wrong = false;
@@ -451,6 +452,12 @@ bot.on('poll_answer', async answer => {
     user.streak++;
     let prevLvl = user.level, currLvl = getLevel(user.points);
     user.level = currLvl;
+    if (last.isGroup && replyChatId < 0) {
+      user.groupStats ||= {};
+      user.groupStats[replyChatId] ||= 0;
+      user.groupStats[replyChatId]++;
+      await updateUser(user);
+    }
     let up = [
       `✅ *Correct!* (+${bonus} points) — ${prettyUsername(user, true)}`,
       `🔥 *Streak*: ${user.streak}`
@@ -458,17 +465,8 @@ bot.on('poll_answer', async answer => {
     if (currLvl > prevLvl) up.push(`🆙 Level up: *${getRank(user.points).emoji} ${getRank(user.points).name}*`);
     await updateUser(user);
 
-    // Save/update group stats
-    if (last.isGroup && replyChatId < 0) {
-      user.groupStats ||= {};
-      user.groupStats[replyChatId] ||= 0;
-      user.groupStats[replyChatId]++;
-      await updateUser(user);
-    }
-
     bot.sendMessage(replyChatId, up.join('\n'), { parse_mode: "Markdown" });
 
-    // Auto-repeat quiz!
     await sendQuiz(replyChatId, user, last.isGroup);
   } else {
     last.wrong = true;
@@ -484,4 +482,4 @@ bot.on('poll_answer', async answer => {
   await db.write();
 });
 
-console.log("✅ Deb's Quiz Bot started on VPS!");
+console.log("✅ Deb's Quiz Bot started on VPS with all group quiz & leaderboard fixes!");
