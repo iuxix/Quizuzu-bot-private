@@ -5,8 +5,8 @@ const { Low } = require('lowdb');
 const { JSONFile } = require('lowdb/node');
 const path = require('path');
 
-const ADMIN_ID = process.env.ADMIN_ID;
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const ADMIN_ID = process.env.ADMIN_ID;
 const db = new Low(new JSONFile(path.join(__dirname, 'db.json')));
 const broadcastWaiters = new Set();
 
@@ -25,16 +25,25 @@ const RANKS = [
   { name: "Legend", points: 400, emoji: "🏆" }
 ];
 
-const stripHtml = t => t?.replace(/&quot;/g, '"').replace(/&#039;/g,"'").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/<[^>]+>/g,"");
-function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i+1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
+function stripHtml(t) {
+  if (!t) return "";
+  return t.replace(/&quot;/g, '"')
+   .replace(/&#039;/g,"'").replace(/&amp;/g,"&")
+   .replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/<[^>]+>/g,"");
+}
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i+1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 const getRank = pts => RANKS.slice().reverse().find(r => pts >= r.points);
-const getLevel = pts => 1 + Math.floor(pts / 25);
+const getLevel = pts => 1 + Math.floor(pts/25);
 const prettyBadge = (pts, streak = 0) => pts >= 400 ? "🏆" : pts >= 200 ? "🥇" : pts >= 100 ? "🥈" : pts >= 50 ? "🥉" : streak >= 10 ? "🔥" : streak >= 5 ? "🌟" : "";
-const prettyUsername = (u, md = false) => {
-  const name = u.nickname || u.first_name || (u.username && '@' + u.username) || "User";
-  return md && u.username ? `[${name}](https://t.me/${u.username})` : name;
-};
+const prettyUsername = (u, md = false) => md && u.username ? `[${u.nickname||u.first_name||("@" + u.username)}](https://t.me/${u.username})` : (u.username ? "@" + u.username : u.nickname || u.first_name || "User");
 
+// --- DB User helpers
 async function getUser(msg) {
   await db.read();
   let user = db.data.users.find(u => u.id === msg.from.id);
@@ -53,20 +62,19 @@ async function getUser(msg) {
     db.data.users.push(user);
     await db.write();
     if (ADMIN_ID && String(ADMIN_ID) !== String(user.id)) {
-      const clickable = prettyUsername(user, true);
-      bot.sendMessage(ADMIN_ID, `🆕 👤 *New user joined*: ${clickable} (\`${user.id}\`)\n👥 Total users: ${db.data.users.length}`, { parse_mode: "Markdown" });
+      bot.sendMessage(ADMIN_ID, `🆕 👤 *New user joined:* ${prettyUsername(user, true)} (\`${user.id}\`)\n👥 Total users: ${db.data.users.length}`, { parse_mode: "Markdown" });
     }
   }
   return user;
 }
 async function updateUser(u) {
   await db.read();
-  const index = db.data.users.findIndex(x => x.id === u.id);
-  if (index !== -1) db.data.users[index] = u;
+  const idx = db.data.users.findIndex(x => x.id === u.id);
+  if (idx !== -1) db.data.users[idx] = u;
   await db.write();
 }
 
-// Quiz fetch: Math only
+// --- Fetch quiz from OpenTDB (Math Only)
 async function fetchQuiz() {
   const { data } = await axios.get("https://opentdb.com/api.php?amount=1&category=19&type=multiple");
   const q = data.results[0];
@@ -82,45 +90,57 @@ async function fetchQuiz() {
   };
 }
 
-// Rich start menu
+// --- Start MENU
 const startMenu = `
 🤖 *Welcome to Deb’s Quiz!*
 
 ✨ *Ultimate MCQ Challenge for Math!*
 
 🎮 *Main Commands:*
-/quiz – 🧮 Start a solo quiz
+/quiz – 🧮 Start math quiz
 /fight – ⚔️ Group quiz battle
-/leaderboard – 🏆 See top 10 in group
+/leaderboard – 🏆 Group top 10
 /profile – 👤 Your profile & stats
-/setnick <name> – ✏️ Change nickname
-/setavatar <emoji> – 🎨 Emoji avatar
-/points – 💰 Your coins, badges, streak
+/setnick <name> – ✏️ Nickname
+/setavatar <emoji> – 🎨 Avatar
+/points – 💰 Coins, badges, streak
 /daily – 🌞 Daily math quiz
 /achievements – 🏅 Badges
 /hint – 💡 Get a hint (3/day)
-/answer – ℹ️ Explanation after wrong answer
-/ranks – 🏅 See all ranks & level system
-/stats – 📊 Detailed stats
+/answer – ℹ️ Explanation if wrong
+/ranks – 🏅 Rank levels
+/stats – 📊 Your progress
 
 👑 *Admin Only:*
-/broadcast – 📢 Global message
+/broadcast – 📢 Message all users
 /users – 👥 User list
-/subs – 👥 Subscriber count
+/subs – 👥 User count
 
-📣 *Speed bonus* for fastest answers! +2 points & streak… climb with /ranks.
+📣 *Speed bonus!* Fastest answers = +2 points!
 `;
 
-bot.onText(/^\/start$/, async (msg) => {
+bot.onText(/^\/start$/, async msg => {
   await getUser(msg);
   bot.sendMessage(msg.chat.id, startMenu, { parse_mode: "Markdown" });
 });
 
-bot.onText(/^\/quiz$/, async (msg) => {
+// --- QUIZ
+async function sendQuiz(chatId, user, isGroup = false) {
+  const quiz = await fetchQuiz();
+  db.data.last_questions[`${chatId}:${user.id}`] = {
+    ...quiz, time: Date.now(), chatId, userId: user.id, answered: false, isGroup
+  };
+  await db.write();
+  await bot.sendPoll(chatId, quiz.question, quiz.answers, {
+    type: "quiz", correct_option_id: quiz.correctIndex, is_anonymous: false,
+    explanation: "🎯 Fastest right answer: +2 pts! Use /hint if stuck."
+  });
+}
+
+bot.onText(/^\/quiz$/, async msg => {
   const user = await getUser(msg);
   await sendQuiz(msg.chat.id, user, msg.chat.type.endsWith("group"));
 });
-
 bot.onText(/^\/fight$/, async msg => {
   if (!msg.chat.type.endsWith("group"))
     return bot.sendMessage(msg.chat.id, "⚔️ Use /fight in a group chat!");
@@ -128,30 +148,26 @@ bot.onText(/^\/fight$/, async msg => {
   await sendQuiz(msg.chat.id, user, true);
 });
 
-// Critical: All answer messages always go to the chat where quiz was posted
-bot.on('poll_answer', async (answer) => {
+// --- Poll answer handling (ensures ALL messages go where quiz was posted)
+bot.on('poll_answer', async answer => {
   await db.read();
   const user = db.data.users.find(u => u.id === answer.user.id);
   if (!user) return;
-  const entryKey = Object.keys(db.data.last_questions).find(k=>k.endsWith(":"+user.id));
+  const entryKey = Object.keys(db.data.last_questions).find(k => k.endsWith(":"+user.id));
   if (!entryKey) return;
   const last = db.data.last_questions[entryKey];
   if (!last || last.answered) return;
   last.answered = true;
-
   const chatId = last.chatId;
   const now = Date.now();
-  let correct = false, bonus = 1;
+  let bonus = 1;
   if (answer.option_ids.includes(last.correctIndex)) {
-    correct = true;
     bonus = (now - last.time < 30000 ? 2 : 1);
     user.points += bonus;
     user.streak++;
     user.level = getLevel(user.points);
     await updateUser(user);
-    // Instead of flooding, we just simulate /correct
-    bot.sendMessage(chatId,
-      `✅ *Correct!* (+${bonus} pts) – ${prettyUsername(user, true)}\n🔥 *Streak:* ${user.streak}`, { parse_mode: "Markdown" });
+    bot.sendMessage(chatId, `✅ *Correct!* (+${bonus} pts) – ${prettyUsername(user, true)}\n🔥 *Streak:* ${user.streak}`, { parse_mode: "Markdown" });
     setTimeout(() => sendQuiz(chatId, user, last.isGroup), 900);
   } else {
     user.streak = 0;
@@ -162,8 +178,9 @@ bot.on('poll_answer', async (answer) => {
   db.data.last_questions[entryKey] = last;
   await db.write();
 });
+// --- Answer/Hint/Leaderboard/Stats/Profile/Admin etc.
 
-bot.onText(/^\/answer/, async (msg) => {
+bot.onText(/^\/answer/, async msg => {
   const user = await getUser(msg);
   const key = msg.chat.id + ":" + user.id;
   const last = db.data.last_questions[key];
@@ -173,8 +190,7 @@ bot.onText(/^\/answer/, async (msg) => {
   bot.sendMessage(msg.chat.id, last.explanation, { parse_mode: "Markdown" });
 });
 
-//--- /profile, nickname, avatar
-bot.onText(/^\/profile$/, async (msg) => {
+bot.onText(/^\/profile$/, async msg => {
   const user = await getUser(msg);
   const txt = [
     "👤 *Your Profile*",
@@ -201,53 +217,25 @@ bot.onText(/^\/setavatar (.+)$/, async (msg, match) => {
   await updateUser(user);
   bot.sendMessage(msg.chat.id, `🎨 Avatar set to: ${user.avatar}`);
 });
-
-//--- /points, /ranks, /stats, /achievements
-bot.onText(/^\/points$/, async (msg) => {
+bot.onText(/^\/points$/, async msg => {
   const user = await getUser(msg);
   const txt = `💰 *Your Points:*\n\n🏅 Rank: ${getRank(user.points).emoji} ${getRank(user.points).name}\n🌟 Level: ${getLevel(user.points)}\n🔥 Streak: ${user.streak}\n💎 Total Points: ${user.points}`;
   bot.sendMessage(msg.chat.id, txt, { parse_mode: "Markdown" });
 });
-
 bot.onText(/^\/ranks$/, (msg) => {
   const text = ["🏅 *Rank Levels:*"];
   RANKS.forEach(r => text.push(`${r.emoji} ${r.name} – ${r.points} pts`));
   bot.sendMessage(msg.chat.id, text.join('\n'), { parse_mode: "Markdown" });
 });
-
 bot.onText(/^\/stats$/, async (msg) => {
   const user = await getUser(msg);
   const txt = `📊 *Progress for ${prettyUsername(user, true)}*\n\n🏅 Rank: ${getRank(user.points).name} ${getRank(user.points).emoji}\n💰 Points: ${user.points}\n🔥 Streak: ${user.streak}\n🌟 Level: ${getLevel(user.points)}\n🎖️ Badges: ${user.badges.length ? user.badges.join(', ') : 'None'}`;
   bot.sendMessage(msg.chat.id, txt, { parse_mode: "Markdown" });
 });
-
 bot.onText(/^\/achievements$/, async (msg) => {
   const user = await getUser(msg);
   bot.sendMessage(msg.chat.id, `🎖️ *Badges*: ${user.badges.length ? user.badges.join(", ") : "None yet"}\nSpecial: ${prettyBadge(user.points, user.streak)}`, { parse_mode: "Markdown" });
 });
-
-//--- Daily
-bot.onText(/^\/daily$/, async (msg) => {
-  const user = await getUser(msg);
-  bot.sendMessage(msg.chat.id, "🌞 *Daily Math Challenge!*",{parse_mode:"Markdown"});
-  await sendQuiz(msg.chat.id, user, msg.chat.type.endsWith("group"));
-});
-
-//--- Group-only leaderboard
-bot.onText(/^\/leaderboard$/, async (msg) => {
-  if (!msg.chat.type.endsWith("group"))
-    return bot.sendMessage(msg.chat.id, "🏆 *Leaderboard only in groups.*", { parse_mode: "Markdown" });
-  await db.read();
-  const top = db.data.users.filter(u => u.points > 0).sort((a, b) => b.points - a.points).slice(0, 10);
-  if (!top.length) return bot.sendMessage(msg.chat.id, "😴 No points yet. Use /quiz to start!", { parse_mode: "Markdown" });
-
-  const lines = top.map((u, i) =>
-    `${i + 1}. ${prettyUsername(u, true)} (${u.username ? `@${u.username}` : "No username"})\n🏅 ${getRank(u.points).emoji} ${getRank(u.points).name} — ${u.points} pts`
-  );
-  bot.sendMessage(msg.chat.id, `🏆 *Top Players:*\n\n${lines.join('\n\n')}`, { parse_mode: "Markdown" });
-});
-
-//--- Hints (3 per day)
 bot.onText(/^\/hint$/, async (msg) => {
   const user = await getUser(msg);
   const key = msg.chat.id + ":" + user.id;
@@ -265,30 +253,45 @@ bot.onText(/^\/hint$/, async (msg) => {
   await db.write();
   bot.sendMessage(msg.chat.id, `💡 *Hint:* ${last.hint}`, { parse_mode: "Markdown" });
 });
+bot.onText(/^\/daily$/, async (msg) => {
+  const user = await getUser(msg);
+  bot.sendMessage(msg.chat.id, "🌞 *Daily Math Challenge!*",{parse_mode:"Markdown"});
+  await sendQuiz(msg.chat.id, user, msg.chat.type.endsWith("group"));
+});
 
-//--- Admin commands
+// --- Group-only leaderboard
+bot.onText(/^\/leaderboard$/, async (msg) => {
+  if (!msg.chat.type.endsWith("group"))
+    return bot.sendMessage(msg.chat.id, "🏆 *Leaderboard only in groups!*", { parse_mode: "Markdown" });
+  await db.read();
+  const top = db.data.users.filter(u => u.points > 0).sort((a, b) => b.points - a.points).slice(0, 10);
+  if (!top.length) return bot.sendMessage(msg.chat.id, "😴 No points yet. Use /quiz!", { parse_mode: "Markdown" });
+
+  const lines = top.map((u, i) =>
+    `${i + 1}. ${prettyUsername(u, true)} (${u.username ? `@${u.username}` : "No username"})\n🏅 ${getRank(u.points).emoji} ${getRank(u.points).name} — ${u.points} pts`
+  );
+  bot.sendMessage(msg.chat.id, `🏆 *Top Players:*\n\n${lines.join('\n\n')}`, { parse_mode: "Markdown" });
+});
+
+// --- Admin
 bot.onText(/^\/users$/, async (msg) => {
   if (String(msg.from.id) !== String(ADMIN_ID)) return;
   await db.read();
-  const users = db.data.users;
-  const txt = users.slice(0, 50).map((u, i) =>
+  const txt = db.data.users.slice(0, 50).map((u, i) =>
     `${i + 1}. ${prettyUsername(u, true)} [${u.id}] — ${u.points} pts`
   ).join('\n');
   bot.sendMessage(msg.chat.id, `👤 *Users:*\n\n${txt}`, { parse_mode: "Markdown" });
 });
-
 bot.onText(/^\/subs$/, async (msg) => {
   if (String(msg.from.id) !== String(ADMIN_ID)) return;
   await db.read();
   bot.sendMessage(msg.chat.id, `👥 Total Subscribers: ${db.data.users.length}`);
 });
-
 bot.onText(/^\/broadcast$/, (msg) => {
   if (String(msg.from.id) !== String(ADMIN_ID)) return;
   bot.sendMessage(msg.chat.id, "📨 Send the message/media to broadcast to all users.");
   broadcastWaiters.add(msg.from.id);
 });
-
 bot.on('message', async (msg) => {
   if (!broadcastWaiters.has(msg.from.id) || String(msg.from.id) !== String(ADMIN_ID)) return;
   await db.read();
@@ -307,7 +310,7 @@ bot.on('message', async (msg) => {
       sent++;
     } catch { failed++; }
   }
-  bot.sendMessage(msg.chat.id, `✅ Broadcast complete.\n📬 Sent: ${sent}\n❌ Failed: ${failed}`);
+  bot.sendMessage(msg.chat.id, `✅ Broadcast sent.\n📬 Sent: ${sent}\n❌ Failed: ${failed}`);
 });
 
-console.log("✅ Deb’s Quiz bot is running! Ready for group & private quizzes with full features.");
+console.log("✅ Deb’s Quiz Bot is running! No features missing.");
