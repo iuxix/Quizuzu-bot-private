@@ -153,7 +153,7 @@ bot.on('poll_answer', async answer => {
   if (!last || last.answered) return;
   last.answered = true;
 
-  const chatId = last.chatId;
+  const chatId = msg.chat.id;
   const now = Date.now();
   let bonus = 1;
   if (answer.option_ids.includes(last.correctIndex)) {
