@@ -448,6 +448,8 @@ bot.on('poll_answer', async answer => {
   if (!last) return;
   let now = Date.now(), bonus = 1;
   last.answered = true;
+  const replyChatId = last.isGroup ? last.chatId : user.id; // 👈 important: use group if group!
+
   if (answer.option_ids && answer.option_ids.includes(last.correct)) {
     last.wrong = false;
     bonus = (now - last.time < 30000) ? 2 : 1;
@@ -456,22 +458,28 @@ bot.on('poll_answer', async answer => {
     let prevLvl = user.level, currLvl = getLevel(user.points);
     user.level = currLvl;
     let up = [
-      `✅ *Correct!* (+${bonus} points)`,
+      `✅ *Correct!* (+${bonus} points) — ${prettyUsername(user, true)}`,
       `🔥 *Streak*: ${user.streak}`
     ];
     if (currLvl > prevLvl) up.push(`🆙 Level up: *${getRank(user.points).emoji} ${getRank(user.points).name}*`);
     await updateUser(user);
-    bot.sendMessage(user.id, up.join('\n'), { parse_mode: "Markdown" });
-    sendQuiz(last.chatId, user, !!last.isGroup);
+    bot.sendMessage(replyChatId, up.join('\n'), { parse_mode: "Markdown" });
+    // Option: ask next quiz or not
+    // if (last.isGroup) sendQuiz(last.chatId, user, true);
   } else {
     last.wrong = true;
     user.streak = 0;
     await updateUser(user);
-    bot.sendMessage(user.id, `❌ *Wrong!*\nWant the explanation? Type /answer.`, { parse_mode: "Markdown" });
-    if (last.isGroup) sendQuiz(last.chatId, user, true);
+    bot.sendMessage(
+      replyChatId,
+      `❌ *Wrong!* — ${prettyUsername(user, true)}\nType /answer for the explanation.`,
+      { parse_mode: "Markdown" }
+    );
+    // if (last.isGroup) sendQuiz(last.chatId, user, true);
   }
   db.data.last_questions[key] = last;
   await db.write();
 });
+
 
 console.log("🎉 Deb's Quiz bot is running (emoji-rich, pro leaderboard, clickable usernames, always-on with HTTP dummy server)!");
