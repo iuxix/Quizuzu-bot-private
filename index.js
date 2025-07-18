@@ -143,35 +143,59 @@ bot.onText(/^\/fight$/, async msg => {
   await sendQuiz(msg.chat.id, user, true);
 });
 
-bot.on('poll_answer', async answer => {
-  await db.read();
-  const user = db.data.users.find(u => u.id === answer.user.id);
-  if (!user) return;
-  const entryKey = Object.keys(db.data.last_questions).find(k => k.endsWith(":"+user.id));
-  if (!entryKey) return;
-  const last = db.data.last_questions[entryKey];
-  if (!last || last.answered) return;
-  last.answered = true;
+bot.on('poll_answer', async (answer) => {
+  try {
+    await db.read();
+    const user = db.data.users.find(u => u.id === answer.user.id);
+    if (!user) return;
 
-  const chatId = last.chatId;
-  const now = Date.now();
-  let bonus = 1;
-  if (answer.option_ids.includes(last.correctIndex)) {
-    bonus = (now - last.time < 30000) ? 2 : 1;
-    user.points += bonus;
-    user.streak++;
-    user.level = getLevel(user.points);
-    await updateUser(user);
-    bot.sendMessage(chatId, `✅ *Correct!* (+${bonus}) – ${prettyUsername(user,true)}\n🔥 *Streak:* ${user.streak}`, { parse_mode: "Markdown" });
-    setTimeout(() => sendQuiz(chatId, user, last.isGroup), 900);
-  } else {
-    user.streak = 0;
-    await updateUser(user);
-    last.wrong = true;
-    bot.sendMessage(chatId, `❌ *Wrong!* – ${prettyUsername(user,true)}\nTry /answer for explanation.`, { parse_mode: "Markdown" });
+    // Get last poll data
+    const keys = Object.keys(db.data.last_questions);
+    const entryKey = keys.find(k => k.endsWith(":" + user.id));
+    if (!entryKey) {
+      console.log("❌ No entry key for poll_answer");
+      return;
+    }
+
+    const last = db.data.last_questions[entryKey];
+    if (!last || last.answered) return;
+
+    // Mark as answered
+    last.answered = true;
+    const chatId = last.chatId;
+    const now = Date.now();
+
+    const correct = answer.option_ids.includes(last.correctIndex);
+    console.log(`✅ Poll Answer Received – correct: ${correct}`);
+
+    if (correct) {
+      const debPoints = (now - last.time < 30000) ? 2 : 1;
+      user.points += debPoints;
+      user.streak++;
+      user.level = getLevel(user.points);
+      await updateUser(user);
+
+      bot.sendMessage(chatId, `✅ *Correct!* (+${debPoints} pts)\n👤 ${prettyUsername(user, true)}\n🔥 *Streak:* ${user.streak}`, { parse_mode: "Markdown" });
+
+      // Auto-next quiz
+      setTimeout(() => {
+        sendQuiz(chatId, user, last.isGroup);
+      }, 1200);
+    } else {
+      user.streak = 0;
+      await updateUser(user);
+      last.wrong = true;
+
+      bot.sendMessage(chatId, `❌ *Wrong!* – ${prettyUsername(user, true)}\nTry /answer to learn.`, {
+        parse_mode: 'Markdown'
+      });
+    }
+
+    db.data.last_questions[entryKey] = last;
+    await db.write();
+  } catch (e) {
+    console.log("❌ poll_answer error:", e);
   }
-  db.data.last_questions[entryKey] = last;
-  await db.write();
 });
 
 // === All Other Commands: profile, leaderboard, users etc.
