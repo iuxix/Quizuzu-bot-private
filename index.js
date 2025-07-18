@@ -7,10 +7,8 @@ const path = require('path');
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const ADMIN_ID = process.env.ADMIN_ID;
-// Deb's allowed group chat ID and username
-const ALLOWED_GROUP_ID = -1002283571682;
-const ALLOWED_GROUP_MENTION = '@NextEra_Chat';
-
+const GROUP_ID = -1002283571682; // @NextEra_Chat group
+const GROUP_MENTION = '@NextEra_Chat';
 const db = new Low(new JSONFile(path.join(__dirname, 'db.json')));
 const broadcastWaiters = new Set();
 
@@ -28,9 +26,7 @@ const RANKS = [
   { name: "Prodigy", points: 200, emoji: "🥇" },
   { name: "Legend", points: 400, emoji: "🏆" }
 ];
-function getRank(points) {
-  return RANKS.slice().reverse().find(r => points >= r.points);
-}
+function getRank(points) { return RANKS.slice().reverse().find(r => points >= r.points); }
 function getLevel(points) { return 1 + Math.floor(points / 25); }
 function prettyBadge(pts, streak = 0) {
   if (pts >= 400) return "🏆";
@@ -49,13 +45,24 @@ function stripHtml(str) {
              .replace(/&gt;/g,">")
              .replace(/<[^>]*>/g, '') || '';
 }
-const prettyUsername = (u, md=false) => {
+function prettyUsername(u, md=false) {
   const name = u.nickname || u.first_name || u.username || "User";
-  if (md && u.username) return `[${name}](https://t.me/${u.username})`;
+  if(md && u.username) return `[${name}](https://t.me/${u.username})`;
   return u.username ? '@'+u.username : name;
-};
-
-// ---- Core Handlers ----
+}
+function shuffle(array) {
+  for (let i=array.length-1;i>0;i--) {
+    const j=Math.floor(Math.random()*(i+1));
+    [array[i],array[j]]=[array[j],array[i]];
+  }
+  return array;
+}
+function getGroupPoints(userId) { return db.data.groupPoints[userId] || 0; }
+function setGroupPoints(userId, pts) { db.data.groupPoints[userId] = pts; }
+function getGroupStreak(userId) { return db.data.groupStreak[userId] || 0; }
+function setGroupStreak(userId, streak) { db.data.groupStreak[userId] = streak; }
+function getGroupBadges(userId) { return db.data.groupBadges[userId] || []; }
+function setGroupBadges(userId, badges) { db.data.groupBadges[userId] = badges; }
 
 async function getUser(msg) {
   await db.read();
@@ -75,7 +82,7 @@ async function getUser(msg) {
     db.data.users.push(user);
     await db.write();
     if (ADMIN_ID && String(ADMIN_ID) !== String(user.id))
-      bot.sendMessage(ADMIN_ID, `🆕 *New user:* ${prettyUsername(user,true)} \`${user.id}\`\n👥 Total: ${db.data.users.length}`, { parse_mode: "Markdown" });
+      bot.sendMessage(ADMIN_ID,`🆕 *New user:* ${prettyUsername(user,true)} (\`${user.id}\`)\n👥 Total: ${db.data.users.length}`,{ parse_mode: "Markdown" });
   }
   return user;
 }
@@ -85,7 +92,13 @@ async function updateUser(u) {
   if (i !== -1) db.data.users[i] = u;
   await db.write();
 }
-// Math, easy only
+function rejectOtherGroups(msg) {
+  if (msg.chat.id !== GROUP_ID) {
+    bot.sendMessage(msg.chat.id, `❌ Deb's Quiz only works in ${GROUP_MENTION}.`);
+    return true;
+  }
+  return false;
+}
 async function fetchQuiz() {
   const url = 'https://opentdb.com/api.php?amount=1&type=multiple&category=19&difficulty=easy';
   const { data } = await axios.get(url);
@@ -101,45 +114,14 @@ async function fetchQuiz() {
     hint: "💡 Try logic, elimination, and reasoning!"
   };
 }
-function shuffle(array) {
-  for (let i=array.length-1;i>0;i--) {
-    const j=Math.floor(Math.random()*(i+1));
-    [array[i],array[j]]=[array[j],array[i]];
-  }
-  return array;
-}
 
-// ----- Group stats storage ----
-function getGroupPoints(userId) {
-  return db.data.groupPoints[userId] || 0;
-}
-function setGroupPoints(userId, pts) {
-  db.data.groupPoints[userId] = pts;
-}
-function getGroupStreak(userId) {
-  return db.data.groupStreak[userId] || 0;
-}
-function setGroupStreak(userId, streak) {
-  db.data.groupStreak[userId] = streak;
-}
-function getGroupBadges(userId) {
-  return db.data.groupBadges[userId] || [];
-}
-function setGroupBadges(userId, badges) {
-  db.data.groupBadges[userId] = badges;
-}
-
-// Block any unknown group
-function rejectOtherGroups(msg) {
-  if (msg.chat.id !== ALLOWED_GROUP_ID)
-    bot.sendMessage(msg.chat.id, `❌ Deb's Quiz only works in ${ALLOWED_GROUP_MENTION}. Ask in that group!`);
-  return msg.chat.id !== ALLOWED_GROUP_ID;
-}
-
+// ---- Start Menu ----
 const startMenu = `
 🤖 *Welcome to Deb’s Quiz!*
 
 ✨ _The ultimate MCQ challenge for Math!_
+
+🎮 *Main Commands:*
 
 /quiz – 🧠 _Start a quiz_
 /fight – ⚔️ _Group quiz battle_
@@ -163,31 +145,20 @@ const startMenu = `
 📣 _Fastest answers earn +2 points!_
 `;
 
-
-// ========== Main Menu =========
 bot.onText(/^\/start$/, async msg => {
   await getUser(msg);
   bot.sendMessage(msg.chat.id, startMenu, { parse_mode: "Markdown" });
 });
-
 bot.onText(/^\/quiz$/, async msg => {
   const user = await getUser(msg);
-  if (msg.chat.type.endsWith("group")) {
-    // Only allow in allowed group
-    if (rejectOtherGroups(msg)) return;
-    await sendGroupQuiz(msg, user);
-  } else {
-    await sendPrivateQuiz(msg, user);
-  }
+  if (msg.chat.type.endsWith("group")) { if (rejectOtherGroups(msg)) return; await sendGroupQuiz(msg, user);
+  } else { await sendPrivateQuiz(msg, user); }
 });
 bot.onText(/^\/fight$/, async msg => {
-  if (!msg.chat.type.endsWith("group"))
-    return bot.sendMessage(msg.chat.id, "⚔️ Use /fight in a group chat!");
+  if (!msg.chat.type.endsWith("group")) return bot.sendMessage(msg.chat.id, "⚔️ Use /fight in a group!");
   if (rejectOtherGroups(msg)) return;
-  const user = await getUser(msg);
-  await sendGroupQuiz(msg, user);
+  const user = await getUser(msg); await sendGroupQuiz(msg, user);
 });
-
 async function sendPrivateQuiz(msg, user) {
   const quiz = await fetchQuiz();
   db.data.last_questions[`${msg.chat.id}:${user.id}`] = {
@@ -211,69 +182,56 @@ async function sendGroupQuiz(msg, user) {
   });
 }
 
-// --------- poll_answer for BOTH group and DM ---------
+// --- POLL ANSWER HANDLER WITH DEBUG MESSAGE TO GROUP! ---
 bot.on('poll_answer', async answer => {
   await db.read();
+  // DEBUG: show poll_answer in main group and log
+  if (answer.user) {
+    bot.sendMessage(GROUP_ID,
+      `🐞 [DEBUG] poll_answer received!\nUser: ${answer.user.first_name||answer.user.username||answer.user.id}\nOption: [${answer.option_ids}]\nPoll ID: ${answer.poll_id}`
+    );
+  }
   const user = db.data.users.find(u => u.id === answer.user.id);
   if (!user) return;
-
-  // Find DM or group quiz: search both types
   const keys = Object.keys(db.data.last_questions);
   let entryKey = keys.find(k => k.endsWith(":" + user.id) && !db.data.last_questions[k].answered);
-
   if (!entryKey) return;
-
   const last = db.data.last_questions[entryKey];
   last.answered = true;
   const chatId = last.chatId;
   const now = Date.now();
   const correct = answer.option_ids.includes(last.correctIndex);
-
-  if (last.isGroup && chatId !== ALLOWED_GROUP_ID) return; // Only work in allowed group!
-
-  // POINT STORAGE LOGIC:
+  if (last.isGroup && chatId !== GROUP_ID) return;
   if (!last.isGroup) {
-    // Private DM points
     let bonus = correct && ((now - last.time) < 30000) ? 2 : 1;
     if (correct) {
-      user.points += bonus;
-      user.streak++;
-      user.level = getLevel(user.points);
-      await updateUser(user);
+      user.points += bonus; user.streak++; user.level = getLevel(user.points); await updateUser(user);
       bot.sendMessage(chatId, `✅ *Correct!* (+${bonus} pts)\n${prettyUsername(user, true)}\n🔥 *Streak:* ${user.streak}`, { parse_mode: "Markdown" });
-      setTimeout(() => sendPrivateQuiz({chat:{id:chatId}}, user), 900);
+      setTimeout(() => sendPrivateQuiz({chat:{id:chatId}}, user), 1000);
     } else {
-      user.streak = 0;
-      await updateUser(user);
-      last.wrong = true;
+      user.streak = 0; await updateUser(user); last.wrong = true;
       bot.sendMessage(chatId, `❌ *Wrong!* ${prettyUsername(user, true)}\nType /answer for explanation.`, { parse_mode: "Markdown" });
     }
   } else {
-    // Group points, separate
     let pts = getGroupPoints(user.id);
     let streak = getGroupStreak(user.id);
     let bonus = correct && ((now - last.time) < 30000) ? 2 : 1;
     if (correct) {
-      pts += bonus;
-      streak += 1;
+      pts += bonus; streak += 1;
       setGroupPoints(user.id, pts);
       setGroupStreak(user.id, streak);
       bot.sendMessage(chatId, `✅ *Correct!* (+${bonus} pts)\n👤 ${prettyUsername(user, true)}\n🔥 *Group Streak:* ${streak}`, { parse_mode: "Markdown" });
-      setTimeout(() => sendGroupQuiz({chat:{id:chatId}}, user), 900);
+      setTimeout(() => sendGroupQuiz({chat:{id:chatId}}, user), 1000);
     } else {
-      streak = 0;
-      setGroupStreak(user.id, streak);
-      last.wrong = true;
+      streak = 0; setGroupStreak(user.id, streak); last.wrong = true;
       bot.sendMessage(chatId, `❌ *Wrong!* ${prettyUsername(user, true)}\nTry /answer for explanation.`, { parse_mode: "Markdown" });
     }
     await db.write();
   }
-
   db.data.last_questions[entryKey] = last;
   await db.write();
 });
 
-// =========== Per-Group Features ==========
 bot.onText(/^\/points$/, async msg => {
   const user = await getUser(msg);
   if (msg.chat.type.endsWith("group")) {
@@ -295,12 +253,12 @@ bot.onText(/^\/profile$/, async msg => {
   let ptext =
     `👤 *Profile*\n`+
     `🆔 ${prettyUsername(user, true)} ${user.avatar||''}\n`+
-    (msg.chat.type.endsWith("group") && msg.chat.id===ALLOWED_GROUP_ID ?
+    (msg.chat.type.endsWith("group") && msg.chat.id===GROUP_ID ?
       `🏅 *Group Rank:* ${getRank(getGroupPoints(user.id)).emoji} ${getRank(getGroupPoints(user.id)).name}\n`
       + `💰 Points: ${getGroupPoints(user.id)}\n🔥 Streak: ${getGroupStreak(user.id)}\n`
       : `🏅 *DM Rank:* ${getRank(user.points).emoji} ${getRank(user.points).name}\n`
       + `💰 Points: ${user.points}\n🔥 Streak: ${user.streak}\n`)+
-    `🎖️ *Badges*: ${(msg.chat.type.endsWith("group")&&msg.chat.id===ALLOWED_GROUP_ID) ? (getGroupBadges(user.id).join(", ")||"None") : (user.badges.join(", ")||"None")}`;
+    `🎖️ *Badges*: ${(msg.chat.type.endsWith("group")&&msg.chat.id===GROUP_ID) ? (getGroupBadges(user.id).join(", ")||"None") : (user.badges.join(", ")||"None")}`;
   bot.sendMessage(msg.chat.id, ptext, { parse_mode:"Markdown" });
 });
 bot.onText(/^\/setnick (.+)$/i, async (msg, m) => {
@@ -319,7 +277,6 @@ bot.onText(/^\/leaderboard$/, async msg => {
   if (!msg.chat.type.endsWith('group')) return bot.sendMessage(msg.chat.id, '🏆 *Leaderboard only in groups!*', { parse_mode:"Markdown" });
   if (rejectOtherGroups(msg)) return;
   await db.read();
-  // Top 10 in group points
   const all = db.data.users.map(u => ({ ...u, _points: getGroupPoints(u.id) }))
     .filter(u => u._points > 0)
     .sort((a, b) => b._points - a._points)
@@ -328,11 +285,8 @@ bot.onText(/^\/leaderboard$/, async msg => {
   const txt = all.map((u, i) =>
     `${i+1}. ${prettyUsername(u,true)}\n${u.avatar || ''} Rank: ${getRank(u._points).emoji} ${getRank(u._points).name}\nPoints: ${u._points}`
   ).join('\n\n');
-  bot.sendMessage(msg.chat.id, `🏆 *${ALLOWED_GROUP_MENTION}: Top Players*\n\n${txt}`, { parse_mode: "Markdown" });
+  bot.sendMessage(msg.chat.id, `🏆 *${GROUP_MENTION}: Top Players*\n\n${txt}`, { parse_mode: "Markdown" });
 });
-
-// --- answer/hint/daily/stats/ranks/achievements -- all per context
-
 bot.onText(/^\/answer/, async msg => {
   const user = await getUser(msg);
   const key = msg.chat.id+":"+user.id;
@@ -344,7 +298,7 @@ bot.onText(/^\/answer/, async msg => {
 });
 bot.onText(/^\/hint$/, async msg => {
   const user = await getUser(msg);
-  const key = msg.chat.id+":"+user.id;
+  const key = msg.chat.id + ":" + user.id;
   const last = db.data.last_questions[key];
   if (!last) return bot.sendMessage(msg.chat.id, "ℹ️ No quiz to hint. Use /quiz first!");
   db.data.hints[user.id] ||= { used: 0, lastReset: Date.now() };
@@ -368,7 +322,7 @@ bot.onText(/^\/daily$/, async msg => {
 });
 bot.onText(/^\/stats$/, async msg => {
   const user = await getUser(msg);
-  if (msg.chat.type.endsWith("group") && msg.chat.id===ALLOWED_GROUP_ID) {
+  if (msg.chat.type.endsWith("group") && msg.chat.id===GROUP_ID) {
     bot.sendMessage(msg.chat.id, `📊 *Your Group Progress*\n${prettyUsername(user, true)}\nRank: ${getRank(getGroupPoints(user.id)).emoji} ${getRank(getGroupPoints(user.id)).name}\nPoints: ${getGroupPoints(user.id)}\nStreak: ${getGroupStreak(user.id)}\nBadges: ${(getGroupBadges(user.id).join(', ')||"None")}`,
     { parse_mode: "Markdown" });
   } else {
@@ -377,7 +331,7 @@ bot.onText(/^\/stats$/, async msg => {
 });
 bot.onText(/^\/achievements$/, async msg => {
   const user = await getUser(msg);
-  if (msg.chat.type.endsWith('group') && msg.chat.id===ALLOWED_GROUP_ID) {
+  if (msg.chat.type.endsWith('group') && msg.chat.id===GROUP_ID) {
     bot.sendMessage(msg.chat.id, `🎖️ *Badges*: ${(getGroupBadges(user.id).join(", ")||"None yet")}\nSpecial: ${prettyBadge(getGroupPoints(user.id), getGroupStreak(user.id))}`, { parse_mode: "Markdown" });
   } else {
     bot.sendMessage(msg.chat.id, `🎖️ *Badges*: ${(user.badges.join(", ")||"None yet")}\nSpecial: ${prettyBadge(user.points, user.streak)}`, { parse_mode: "Markdown" });
@@ -388,8 +342,6 @@ bot.onText(/^\/ranks$/, msg => {
   RANKS.forEach(r => text.push(`${r.emoji} ${r.name} – ${r.points} pts`));
   bot.sendMessage(msg.chat.id, text.join('\n'), { parse_mode: "Markdown" });
 });
-
-// --- Admin only
 bot.onText(/^\/subs$/, async msg => {
   if (String(msg.from.id) !== String(ADMIN_ID)) return;
   await db.read();
@@ -425,4 +377,5 @@ bot.on('message', async msg => {
   }
   bot.sendMessage(msg.chat.id, `✅ Broadcast complete!\n📬 Sent: ${sent}\n❌ Failed: ${failed}`);
 });
-console.log("✅ Deb’s Quiz Bot for @NextEra_Chat and DMs is live: group and private logic separated, all features tested.");
+
+console.log("✅ Deb’s Quiz Bot FULL (with group debug for every poll answer) is running—every command, feature, leaderboard, points, and admin tools included.");
